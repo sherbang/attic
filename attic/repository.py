@@ -1,6 +1,6 @@
 from configparser import RawConfigParser
 from binascii import hexlify
-import fcntl
+import errno
 import os
 import re
 import shutil
@@ -8,7 +8,7 @@ import struct
 from zlib import crc32
 
 from .hashindex import NSIndex
-from .helpers import IntegrityError, read_msgpack, write_msgpack, unhexlify
+from .helpers import Error, IntegrityError, read_msgpack, write_msgpack, unhexlify, UpgradableLock
 from .lrucache import LRUCache
 
 MAX_OBJECT_SIZE = 20 * 1024 * 1024
@@ -31,15 +31,20 @@ class Repository(object):
     DEFAULT_MAX_SEGMENT_SIZE = 5 * 1024 * 1024
     DEFAULT_SEGMENTS_PER_DIR = 10000
 
-    class DoesNotExist(KeyError):
-        """Requested key does not exist"""
+    class DoesNotExist(Error):
+        """Repository {} does not exist"""
 
-    class AlreadyExists(KeyError):
-        """Requested key does not exist"""
+    class AlreadyExists(Error):
+        """Repository {} already exists"""
+
+    class InvalidRepository(Error):
+        """{} is not a valid repository"""
+
 
     def __init__(self, path, create=False):
+        self.path = path
         self.io = None
-        self.lock_fd = None
+        self.lock = None
         if create:
             self.create(path)
         self.open(path)
@@ -71,22 +76,21 @@ class Repository(object):
         self.path = path
         if not os.path.isdir(path):
             raise self.DoesNotExist(path)
-        self.lock_fd = open(os.path.join(path, 'config'), 'r')
-        fcntl.flock(self.lock_fd, fcntl.LOCK_EX)
         self.config = RawConfigParser()
         self.config.read(os.path.join(self.path, 'config'))
-        if self.config.getint('repository', 'version') != 1:
-            raise Exception('%s Does not look like an Attic repository')
+        if not 'repository' in self.config.sections() or self.config.getint('repository', 'version') != 1:
+            raise self.InvalidRepository(path)
+        self.lock = UpgradableLock(os.path.join(path, 'config'))
         self.max_segment_size = self.config.getint('repository', 'max_segment_size')
         self.segments_per_dir = self.config.getint('repository', 'segments_per_dir')
         self.id = unhexlify(self.config.get('repository', 'id').strip())
         self.rollback()
 
     def close(self):
-        if self.lock_fd:
+        if self.lock:
             self.rollback()
-            self.lock_fd.close()
-            self.lock_fd = None
+            self.lock.release()
+            self.lock = None
 
     def commit(self, rollback=True):
         """Commit transaction
@@ -202,6 +206,7 @@ class Repository(object):
             self.io.close()
         self.io = LoggedIO(self.path, self.max_segment_size, self.segments_per_dir)
         if self.io.head is not None and not os.path.exists(os.path.join(self.path, 'index.%d' % self.io.head)):
+            self.lock.upgrade()
             self.recover(self.path)
         self.open_index(self.io.head, read_only=True)
 
@@ -213,7 +218,7 @@ class Repository(object):
             segment, offset = self.index[id]
             return self.io.read(segment, offset, id)
         except KeyError:
-            raise self.DoesNotExist
+            raise self.DoesNotExist(self.path)
 
     def get_many(self, ids, peek=None):
         for id in ids:
@@ -222,6 +227,7 @@ class Repository(object):
     def put(self, id, data, wait=True):
         if not self._active_txn:
             self._active_txn = True
+            self.lock.upgrade()
             self.open_index(self.io.head)
         try:
             segment, _ = self.index[id]
@@ -240,6 +246,7 @@ class Repository(object):
     def delete(self, id, wait=True):
         if not self._active_txn:
             self._active_txn = True
+            self.lock.upgrade()
             self.open_index(self.io.head)
         try:
             segment, offset = self.index.pop(id)
@@ -249,7 +256,7 @@ class Repository(object):
             self.compact.add(segment)
             self.segments.setdefault(segment, 0)
         except KeyError:
-            raise self.DoesNotExist
+            raise self.DoesNotExist(self.path)
 
     def add_callback(self, cb, data):
         cb(None, None, data)
@@ -289,7 +296,7 @@ class LoggedIO(object):
     def _segment_names(self, reverse=False):
         for dirpath, dirs, filenames in os.walk(os.path.join(self.path, 'data')):
             dirs.sort(key=int, reverse=reverse)
-            filenames.sort(key=int, reverse=reverse)
+            filenames = sorted((filename for filename in filenames if filename.isdigit()), key=int, reverse=reverse)
             for filename in filenames:
                 yield int(filename), os.path.join(dirpath, filename)
 
@@ -308,7 +315,13 @@ class LoggedIO(object):
 
     def is_complete_segment(self, filename):
         with open(filename, 'rb') as fd:
-            fd.seek(-self.header_fmt.size, 2)
+            try:
+                fd.seek(-self.header_fmt.size, os.SEEK_END)
+            except Exception as e:
+                # return False if segment file is empty or too small
+                if e.errno == errno.EINVAL:
+                    return False
+                raise e
             return fd.read(self.header_fmt.size) == self.COMMIT
 
     def segment_filename(self, segment):

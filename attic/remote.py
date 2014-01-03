@@ -4,17 +4,16 @@ import os
 import select
 from subprocess import Popen, PIPE
 import sys
-import getpass
 
+from .helpers import Error
 from .repository import Repository
 from .lrucache import LRUCache
 
 BUFSIZE = 10 * 1024 * 1024
 
 
-class ConnectionClosed(Exception):
-    """Connection closed by remote host
-    """
+class ConnectionClosed(Error):
+    """Connection closed by remote host"""
 
 
 class RepositoryServer(object):
@@ -72,6 +71,7 @@ class RemoteRepository(object):
             self.name = name
 
     def __init__(self, location, create=False):
+        self.repository_url = '%s@%s:%s' % (location.user, location.host, location.path)
         self.p = None
         self.cache = LRUCache(256)
         self.to_send = b''
@@ -106,9 +106,9 @@ class RemoteRepository(object):
             self.id = self.call('open', (location.path, create))
         except self.RPCError as e:
             if e.name == b'DoesNotExist':
-                raise Repository.DoesNotExist
+                raise Repository.DoesNotExist(self.repository_url)
             elif e.name == b'AlreadyExists':
-                raise Repository.AlreadyExists
+                raise Repository.AlreadyExists(self.repository_url)
 
     def __del__(self):
         self.close()
@@ -248,7 +248,7 @@ class RemoteRepository(object):
                 return res
         except self.RPCError as e:
             if e.name == b'DoesNotExist':
-                raise Repository.DoesNotExist
+                raise Repository.DoesNotExist(self.repository_url)
             raise
 
     def get_many(self, ids, peek=None):

@@ -8,9 +8,48 @@ import re
 import stat
 import sys
 import time
-from datetime import datetime, timedelta
+from datetime import datetime, timezone
 from fnmatch import fnmatchcase
 from operator import attrgetter
+import fcntl
+
+
+class Error(Exception):
+    """Error base class"""
+
+    exit_code = 1
+
+    def get_message(self):
+        return 'Error: ' + type(self).__doc__.format(*self.args)
+
+
+class UpgradableLock:
+
+    class LockUpgradeFailed(Error):
+        """Failed to acquire write lock on {}"""
+
+    def __init__(self, path, exclusive=False):
+        self.path = path
+        try:
+            self.fd = open(path, 'r+')
+        except IOError:
+            self.fd = open(path, 'r')
+        if exclusive:
+            fcntl.lockf(self.fd, fcntl.LOCK_EX)
+        else:
+            fcntl.lockf(self.fd, fcntl.LOCK_SH)
+        self.is_exclusive = exclusive
+
+    def upgrade(self):
+        try:
+            fcntl.lockf(self.fd, fcntl.LOCK_EX)
+        except OSError as e:
+            raise self.LockUpgradeFailed(self.path)
+        self.is_exclusive = True
+
+    def release(self):
+        fcntl.lockf(self.fd, fcntl.LOCK_UN)
+        self.fd.close()
 
 
 class Manifest:
@@ -99,7 +138,7 @@ def get_cache_dir():
 
 def to_localtime(ts):
     """Convert datetime object from UTC to local time zone"""
-    return ts - timedelta(seconds=time.altzone)
+    return datetime(*time.localtime((ts - datetime(1970, 1, 1, tzinfo=timezone.utc)).total_seconds())[:6])
 
 
 def adjust_patterns(paths, excludes):

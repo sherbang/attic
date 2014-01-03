@@ -1,4 +1,4 @@
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from getpass import getuser
 from itertools import zip_longest
 import msgpack
@@ -10,7 +10,7 @@ import time
 from io import BytesIO
 from attic import xattr
 from attic.chunker import chunkify
-from attic.helpers import uid2user, user2uid, gid2group, group2gid, \
+from attic.helpers import Error, uid2user, user2uid, gid2group, group2gid, \
     Statistics, decode_dict, st_mtime_ns, make_path_safe
 
 ITEMS_BUFFER = 1024 * 1024
@@ -72,11 +72,11 @@ class ItemIter(object):
 
 class Archive(object):
 
-    class DoesNotExist(Exception):
-        pass
+    class DoesNotExist(Error):
+        """Archive {} does not exist"""
 
-    class AlreadyExists(Exception):
-        pass
+    class AlreadyExists(Error):
+        """Archive {} already exists"""
 
     def __init__(self, repository, key, manifest, name, cache=None, create=False,
                  checkpoint_interval=300, numeric_owner=False):
@@ -122,7 +122,7 @@ class Archive(object):
     def ts(self):
         """Timestamp of archive creation in UTC"""
         t, f = self.metadata[b'time'].split('.', 1)
-        return datetime.strptime(t, '%Y-%m-%dT%H:%M:%S') + timedelta(seconds=float('.' + f))
+        return datetime.strptime(t, '%Y-%m-%dT%H:%M:%S').replace(tzinfo=timezone.utc) + timedelta(seconds=float('.' + f))
 
     def __repr__(self):
         return 'Archive(%r)' % self.name

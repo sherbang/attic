@@ -1,12 +1,11 @@
 from configparser import RawConfigParser
-import fcntl
 from itertools import zip_longest
 import msgpack
 import os
 from binascii import hexlify
 import shutil
 
-from .helpers import get_cache_dir, decode_dict, st_mtime_ns, unhexlify
+from .helpers import Error, get_cache_dir, decode_dict, st_mtime_ns, unhexlify, UpgradableLock
 from .hashindex import ChunkIndex
 
 
@@ -14,9 +13,8 @@ class Cache(object):
     """Client Side cache
     """
 
-    class RepositoryReplay(Exception):
-        """
-        """
+    class RepositoryReplay(Error):
+        """Cache is newer than repository, refusing to continue"""
 
     def __init__(self, repository, key, manifest):
         self.timestamp = None
@@ -58,8 +56,7 @@ class Cache(object):
     def open(self):
         if not os.path.isdir(self.path):
             raise Exception('%s Does not look like an Attic cache' % self.path)
-        self.lock_fd = open(os.path.join(self.path, 'README'), 'r+')
-        fcntl.flock(self.lock_fd, fcntl.LOCK_EX)
+        self.lock = UpgradableLock(os.path.join(self.path, 'config'), exclusive=True)
         self.rollback()
         self.config = RawConfigParser()
         self.config.read(os.path.join(self.path, 'config'))
@@ -72,7 +69,7 @@ class Cache(object):
         self.files = None
 
     def close(self):
-        self.lock_fd.close()
+        self.lock.release()
 
     def _read_files(self):
         self.files = {}
