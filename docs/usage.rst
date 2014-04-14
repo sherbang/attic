@@ -17,44 +17,34 @@ messages as it is processing.
 
 .. include:: usage/init.rst.inc
 
-This command initializes an empty :ref:`repository <repository_def>`.
-A repository is a filesystem directory
-containing the deduplicated data from zero or more archives.
-Encryption is enabled at repository initialization time.
-
 Examples
 ~~~~~~~~
 ::
 
-    # Local backup repository
+    # Local repository
     $ attic init /data/mybackuprepo.attic
 
-    # Remote backup repository
+    # Remote repository
     $ attic init user@hostname:mybackuprepo.attic
 
-    # Encrypted remote backup repository
+    # Encrypted remote repository
     $ attic init --encryption=passphrase user@hostname:mybackuprepo.attic
 
 
 .. include:: usage/create.rst.inc
 
-This command creates a backup archive containing all files found while
-recursively traversing all paths specified. The archive will consume almost
-no disk space for files or parts of files that has already been archived by
-other archives.
-
 Examples
 ~~~~~~~~
 ::
 
-    # Backups ~/Documents into an archive named "my-documents"
+    # Backup ~/Documents into an archive named "my-documents"
     $ attic create /data/myrepo.attic::my-documents ~/Documents
 
     # Backup ~/Documents and ~/src but exclude pyc files
     $ attic create /data/myrepo.attic::my-files   \
         ~/Documents                               \
         ~/src                                     \
-        --exclude *.pyc
+        --exclude '*.pyc'
 
     # Backup the root filesystem into an archive named "root-YYYY-MM-DD"
     NAME="root-`date +%Y-%m-%d`"
@@ -62,11 +52,6 @@ Examples
 
 
 .. include:: usage/extract.rst.inc
-
-This command extracts the contents of an archive. By default the entire
-archive is extracted but a subset of files and directories can be selected
-by passing a list of ``PATHs`` as arguments. The file selection can further
-be restricted by using the ``--exclude`` option.
 
 Examples
 ~~~~~~~~
@@ -82,26 +67,13 @@ Examples
     $ attic extract /data/myrepo::my-files home/USERNAME/src
 
     # Extract the "src" directory but exclude object files
-    $ attic extract /data/myrepo::my-files home/USERNAME/src --exclude *.o
+    $ attic extract /data/myrepo::my-files home/USERNAME/src --exclude '*.o'
 
-
-.. include:: usage/verify.rst.inc
-
-This command is similar to :ref:`attic_extract` but instead of writing any
-files to disk the command just verifies that all files are extractable and
-not corrupt. |project_name| will not compare the the archived files with the
-files on disk.
-
+.. include:: usage/check.rst.inc
 
 .. include:: usage/delete.rst.inc
 
-This command deletes an archive from the repository. Any disk space not
-shared with any other existing archive is also reclaimed.
-
-
 .. include:: usage/list.rst.inc
-
-This command lists the contents of a repository or an archive.
 
 Examples
 ~~~~~~~~
@@ -125,25 +97,26 @@ Examples
 
 .. include:: usage/prune.rst.inc
 
-The ``prune`` command prunes a repository by deleting archives not matching
-any of the specified retention options specified. This command is normally
-used by automated backup scripts wanting to keep a certain number of historic
-backups. 
-
 Examples
 ~~~~~~~~
 ::
 
-    # Keep 7 end of day and 4 end of week archives
-    $ attic prune /data/myrepo --daily=7 --weekly=4
+    # Keep 7 end of day and 4 additional end of week archives:
+    $ attic prune /data/myrepo --keep-daily=7 --keep-weekly=4
 
-    # Same as above but only apply to archive names starting with "foo"
-    $ attic prune /data/myrepo --daily=7 --weekly=4 --prefix=foo
+    # Same as above but only apply to archive names starting with "foo":
+    $ attic prune /data/myrepo --keep-daily=7 --keep-weekly=4 --prefix=foo
+
+    # Keep 7 end of day, 4 additional end of week archives,
+    # and an end of month archive for every month:
+    $ attic prune /data/myrepo --keep-daily=7 --keep-weekly=4 --monthly=-1
+
+    # Keep all backups in the last 10 days, 4 additional end of week archives,
+    # and an end of month archive for every month:
+    $ attic prune /data/myrepo --keep-within=10d --keep-weekly=4 --monthly=-1
 
 
 .. include:: usage/info.rst.inc
-
-This command displays some detailed information about the specified archive.
 
 Examples
 ~~~~~~~~
@@ -164,11 +137,6 @@ Examples
 
 .. include:: usage/mount.rst.inc
 
-This command mounts an archive as a FUSE filesystem. This can be useful for
-browsing an archive or restoring individual files. Unless the ``--foreground``
-option is given the command will run in the background until the filesystem
-is ``umounted``.
-
 Examples
 ~~~~~~~~
 ::
@@ -181,15 +149,12 @@ Examples
 
 .. include:: usage/change-passphrase.rst.inc
 
-The key files used for repository encryption are optionally passphrase
-protected. This command can be used to change this passphrase.
-
 Examples
 ~~~~~~~~
 ::
 
     # Create a key file protected repository
-    $ attic init --key-file /tmp/encrypted-repo
+    $ attic init --encryption=keyfile /tmp/encrypted-repo
     Initializing repository at "/tmp/encrypted-repo"
     Enter passphrase (empty for no passphrase):
     Enter same passphrase again: 

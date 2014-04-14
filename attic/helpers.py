@@ -8,10 +8,14 @@ import re
 import stat
 import sys
 import time
-from datetime import datetime, timezone
-from fnmatch import fnmatchcase
+from datetime import datetime, timezone, timedelta
+from fnmatch import translate
 from operator import attrgetter
 import fcntl
+
+import attic.hashindex
+import attic.chunker
+import attic.crypto
 
 
 class Error(Exception):
@@ -21,6 +25,10 @@ class Error(Exception):
 
     def get_message(self):
         return 'Error: ' + type(self).__doc__.format(*self.args)
+
+
+class ExtensionModuleError(Error):
+    """The Attic binary extension modules does not seem to be properly installed"""
 
 
 class UpgradableLock:
@@ -52,21 +60,32 @@ class UpgradableLock:
         self.fd.close()
 
 
+def check_extension_modules():
+    import attic.platform
+    if (attic.hashindex.API_VERSION != 1 or
+        attic.chunker.API_VERSION != 1 or
+        attic.crypto.API_VERSION != 1 or
+        attic.platform.API_VERSION != 1):
+        raise ExtensionModuleError
+
+
 class Manifest:
 
     MANIFEST_ID = b'\0' * 32
 
-    def __init__(self):
+    def __init__(self, key, repository):
         self.archives = {}
         self.config = {}
+        self.key = key
+        self.repository = repository
 
     @classmethod
-    def load(cls, repository):
+    def load(cls, repository, key=None):
         from .key import key_factory
-        manifest = cls()
-        manifest.repository = repository
-        cdata = repository.get(manifest.MANIFEST_ID)
-        manifest.key = key = key_factory(repository, cdata)
+        cdata = repository.get(cls.MANIFEST_ID)
+        if not key:
+            key = key_factory(repository, cdata)
+        manifest = cls(key, repository)
         data = key.decrypt(None, cdata)
         manifest.id = key.id_hash(data)
         m = msgpack.unpackb(data)
@@ -81,28 +100,41 @@ class Manifest:
 
     def write(self):
         self.timestamp = datetime.utcnow().isoformat()
-        data = msgpack.packb({
+        data = msgpack.packb(StableDict({
             'version': 1,
             'archives': self.archives,
             'timestamp': self.timestamp,
             'config': self.config,
-        })
+        }))
         self.id = self.key.id_hash(data)
         self.repository.put(self.MANIFEST_ID, self.key.encrypt(data))
 
 
+def prune_within(archives, within):
+    multiplier = {'H': 1, 'd': 24, 'w': 24*7, 'm': 24*31, 'y': 24*365}
+    try:
+        hours = int(within[:-1]) * multiplier[within[-1]]
+    except (KeyError, ValueError):
+        # I don't like how this displays the original exception too:
+        raise argparse.ArgumentTypeError('Unable to parse --within option: "%s"' % within)
+    if hours <= 0:
+        raise argparse.ArgumentTypeError('Number specified using --within option must be positive')
+    target = datetime.now(timezone.utc) - timedelta(seconds=hours*60*60)
+    return [a for a in archives if a.ts > target]
+
+
 def prune_split(archives, pattern, n, skip=[]):
-    items = {}
+    last = None
     keep = []
-    for a in archives:
-        key = to_localtime(a.ts).strftime(pattern)
-        items.setdefault(key, [])
-        items[key].append(a)
-    for key, values in sorted(items.items(), reverse=True):
-        if n and values[0] not in skip:
-            values.sort(key=attrgetter('ts'), reverse=True)
-            keep.append(values[0])
-            n -= 1
+    if n == 0:
+        return keep
+    for a in sorted(archives, key=attrgetter('ts'), reverse=True):
+        period = to_localtime(a.ts).strftime(pattern)
+        if period != last:
+            last = period
+            if a not in skip:
+                keep.append(a)
+                if len(keep) == n: break
     return keep
 
 
@@ -117,11 +149,12 @@ class Statistics:
         if unique:
             self.usize += csize
 
-    def print_(self):
-        print('Number of files: %d' % self.nfiles)
-        print('Original size: %d (%s)' % (self.osize, format_file_size(self.osize)))
-        print('Compressed size: %s (%s)' % (self.csize, format_file_size(self.csize)))
-        print('Unique data: %d (%s)' % (self.usize, format_file_size(self.usize)))
+    def print_(self, label, cache):
+        total_size, total_csize, unique_size, unique_csize = cache.chunks.summarize()
+        print()
+        print('                       Original size      Compressed size    Deduplicated size')
+        print('%-15s %20s %20s %20s' % (label, format_file_size(self.osize), format_file_size(self.csize), format_file_size(self.usize)))
+        print('All archives:   %20s %20s %20s' % (format_file_size(total_size), format_file_size(total_csize), format_file_size(unique_csize)))
 
 
 def get_keys_dir():
@@ -141,6 +174,19 @@ def to_localtime(ts):
     return datetime(*time.localtime((ts - datetime(1970, 1, 1, tzinfo=timezone.utc)).total_seconds())[:6])
 
 
+def update_excludes(args):
+    """Merge exclude patterns from files with those on command line.
+    Empty lines and lines starting with '#' are ignored, but whitespace
+    is not stripped."""
+    if hasattr(args, 'exclude_files') and args.exclude_files:
+        if not hasattr(args, 'excludes') or args.excludes is None:
+            args.excludes = []
+        for file in args.exclude_files:
+            patterns = [line.rstrip('\r\n') for line in file if not line.startswith('#')]
+            args.excludes += [ExcludePattern(pattern) for pattern in patterns if pattern]
+            file.close()
+
+
 def adjust_patterns(paths, excludes):
     if paths:
         return (excludes or []) + [IncludePattern(path) for path in paths] + [ExcludePattern('*')]
@@ -150,7 +196,7 @@ def adjust_patterns(paths, excludes):
 
 def exclude_path(path, patterns):
     """Used by create and extract sub-commands to determine
-    if an item should be processed or not
+    whether or not an item should be processed.
     """
     for pattern in (patterns or []):
         if pattern.match(path):
@@ -158,34 +204,43 @@ def exclude_path(path, patterns):
     return False
 
 
+# For both IncludePattern and ExcludePattern, we require that
+# the pattern either match the whole path or an initial segment
+# of the path up to but not including a path separator.  To
+# unify the two cases, we add a path separator to the end of
+# the path before matching.
+
 class IncludePattern:
-    """--include PATTERN
+    """Literal files or directories listed on the command line
+    for some operations (e.g. extract, but not create).
+    If a directory is specified, all paths that start with that
+    path match as well.  A trailing slash makes no difference.
     """
     def __init__(self, pattern):
-        self.pattern = pattern
+        self.pattern = pattern.rstrip(os.path.sep)+os.path.sep
 
     def match(self, path):
-        dir, name = os.path.split(path)
-        return (path == self.pattern
-                or (dir + os.path.sep).startswith(self.pattern))
+        return (path+os.path.sep).startswith(self.pattern)
 
     def __repr__(self):
         return '%s(%s)' % (type(self), self.pattern)
 
 
 class ExcludePattern(IncludePattern):
-    """
+    """Shell glob patterns to exclude.  A trailing slash means to
+    exclude the contents of a directory, but not the directory itself.
     """
     def __init__(self, pattern):
-        self.pattern = self.dirpattern = pattern
-        if not pattern.endswith(os.path.sep):
-            self.dirpattern += os.path.sep
+        if pattern.endswith(os.path.sep):
+            self.pattern = pattern+'*'+os.path.sep
+        else:
+            self.pattern = pattern+os.path.sep+'*'
+        # fnmatch and re.match both cache compiled regular expressions.
+        # Nevertheless, this is about 10 times faster.
+        self.regex = re.compile(translate(self.pattern))
 
     def match(self, path):
-        dir, name = os.path.split(path)
-        return (path == self.pattern
-                or (dir + os.path.sep).startswith(self.dirpattern)
-                or fnmatchcase(name, self.pattern))
+        return self.regex.match(path+os.path.sep) is not None
 
     def __repr__(self):
         return '%s(%s)' % (type(self), self.pattern)
@@ -241,19 +296,24 @@ def format_file_mode(mod):
 def format_file_size(v):
     """Format file size into a human friendly format
     """
-    if v > 1024 * 1024 * 1024:
-        return '%.2f GB' % (v / 1024. / 1024. / 1024.)
-    elif v > 1024 * 1024:
-        return '%.2f MB' % (v / 1024. / 1024.)
-    elif v > 1024:
-        return '%.2f kB' % (v / 1024.)
+    if abs(v) > 10**12:
+        return '%.2f TB' % (v / 10**12)
+    elif abs(v) > 10**9:
+        return '%.2f GB' % (v / 10**9)
+    elif abs(v) > 10**6:
+        return '%.2f MB' % (v / 10**6)
+    elif abs(v) > 10**3:
+        return '%.2f kB' % (v / 10**3)
     else:
         return '%d B' % v
 
 
-class IntegrityError(Exception):
-    """
-    """
+def format_archive(archive):
+    return '%-36s %s' % (archive.name, to_localtime(archive.ts).strftime('%c'))
+
+
+class IntegrityError(Error):
+    """Data integrity error"""
 
 
 def memoize(function):
@@ -270,35 +330,64 @@ def memoize(function):
 
 
 @memoize
-def uid2user(uid):
+def uid2user(uid, default=None):
     try:
         return pwd.getpwuid(uid).pw_name
     except KeyError:
-        return None
+        return default
 
 
 @memoize
-def user2uid(user):
+def user2uid(user, default=None):
     try:
         return user and pwd.getpwnam(user).pw_uid
     except KeyError:
-        return None
+        return default
 
 
 @memoize
-def gid2group(gid):
+def gid2group(gid, default=None):
     try:
         return grp.getgrgid(gid).gr_name
     except KeyError:
-        return None
+        return default
 
 
 @memoize
-def group2gid(group):
+def group2gid(group, default=None):
     try:
         return group and grp.getgrnam(group).gr_gid
     except KeyError:
-        return None
+        return default
+
+
+def acl_use_local_uid_gid(acl):
+    """Replace the user/group field with the local uid/gid if possible
+    """
+    entries = []
+    for entry in acl.decode('ascii').split('\n'):
+        if entry:
+            fields = entry.split(':')
+            if fields[0] == 'user' and fields[1]:
+                fields[1] = user2uid(fields[1], fields[3])
+            elif fields[0] == 'group' and fields[1]:
+                fields[1] = group2gid(fields[1], fields[3])
+            entries.append(':'.join(entry.split(':')[:3]))
+    return ('\n'.join(entries)).encode('ascii')
+
+
+def acl_use_stored_uid_gid(acl):
+    """Replace the user/group field with the stored uid/gid
+    """
+    entries = []
+    for entry in acl.decode('ascii').split('\n'):
+        if entry:
+            fields = entry.split(':')
+            if len(fields) == 4:
+                entries.append(':'.join([fields[0], fields[3], fields[2]]))
+            else:
+                entries.append(entry)
+    return ('\n'.join(entries)).encode('ascii')
 
 
 class Location:
@@ -431,6 +520,12 @@ def daemonize():
     os.dup2(fd, 0)
     os.dup2(fd, 1)
     os.dup2(fd, 2)
+
+
+class StableDict(dict):
+    """A dict subclass with stable items() ordering"""
+    def items(self):
+        return sorted(super(StableDict, self).items())
 
 
 if sys.version < '3.3':

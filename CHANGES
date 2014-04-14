@@ -3,16 +3,69 @@ Attic Changelog
 
 Here you can see the full list of changes between each Attic release.
 
-Version 0.9
------------
+Version 0.13
+------------
 
 (feature release, released on X)
 
+- Experimental Linux ACL support (#66)
+- Added support for backup and restore of BSDFlags (OSX, FreeBSD) (#56)
+- Fix bug where xattrs on symlinks were not correctly restored
+
+Version 0.12
+------------
+
+(feature release, released on April 7, 2014)
+
+- Python 3.4 support (#62)
+- Various documentation improvements a new style
+- ``attic mount`` now supports mounting an entire repository not only
+  individual archives (#59)
+- Added option to restrict remote repository access to specific path(s):
+  ``attic serve --restrict-to-path X`` (#51)
+- Include "all archives" size information in "--stats" output. (#54)
+- Added ``--stats`` option to ``attic delete`` and ``attic prune``
+- Fixed bug where ``attic prune`` used UTC instead of the local time zone
+  when determining which archives to keep.
+- Switch to SI units (Power of 1000 instead 1024) when printing file sizes
+
+Version 0.11
+------------
+
+(feature release, released on March 7, 2014)
+
+- New "check" command for repository consistency checking (#24)
+- Documentation improvements
+- Fix exception during "attic create" with repeated files (#39)
+- New "--exclude-from" option for attic create/extract/verify.
+- Improved archive metadata deduplication.
+- "attic verify" has been deprecated. Use "attic extract --dry-run" instead.
+- "attic prune --hourly|daily|..." has been deprecated.
+  Use "attic prune --keep-hourly|daily|..." instead.
+- Ignore xattr errors during "extract" if not supported by the filesystem. (#46)
+
+Version 0.10
+------------
+
+(bugfix release, released on Jan 30, 2014)
+
+- Fix deadlock when extracting 0 sized files from remote repositories
+- "--exclude" wildcard patterns are now properly applied to the full path
+  not just the file name part (#5).
+- Make source code endianness agnostic (#1)
+
+Version 0.9
+-----------
+
+(feature release, released on Jan 23, 2014)
+
+- Remote repository speed and reliability improvements.
 - Fix sorting of segment names to ignore NFS left over files. (#17)
 - Fix incorrect display of time (#13)
 - Improved error handling / reporting. (#12)
 - Use fcntl() instead of flock() when locking repository/cache. (#15)
 - Let ssh figure out port/user if not specified so we don't override .ssh/config (#9)
+- Improved libcrypto path detection (#23).
 
 Version 0.8.1
 -------------

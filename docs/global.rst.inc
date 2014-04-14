@@ -13,7 +13,13 @@
 .. _OpenSSL: https://www.openssl.org/
 .. _Python: http://www.python.org/
 .. _`msgpack-python`: https://pypi.python.org/pypi/msgpack-python/
+.. _llfuse: https://pypi.python.org/pypi/llfuse/
 .. _homebrew: http://mxcl.github.io/homebrew/
 .. _issue tracker: https://github.com/jborg/attic/issues
 .. _userspace filesystems: https://en.wikipedia.org/wiki/Filesystem_in_Userspace
 .. _librelist: http://librelist.com/
+.. _Debian: http://packages.debian.org/attic
+.. _Ubuntu: http://packages.ubuntu.com/attic
+.. _Arch Linux: https://aur.archlinux.org/packages/attic/
+.. _Slackware: http://slackbuilds.org/result/?search=Attic
+.. _Cython: http://cython.org/

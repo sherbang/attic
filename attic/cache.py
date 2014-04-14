@@ -1,5 +1,5 @@
 from configparser import RawConfigParser
-from itertools import zip_longest
+from attic.remote import cache_if_remote
 import msgpack
 import os
 from binascii import hexlify
@@ -16,17 +16,17 @@ class Cache(object):
     class RepositoryReplay(Error):
         """Cache is newer than repository, refusing to continue"""
 
-    def __init__(self, repository, key, manifest):
+    def __init__(self, repository, key, manifest, path=None, sync=True):
         self.timestamp = None
         self.txn_active = False
         self.repository = repository
         self.key = key
         self.manifest = manifest
-        self.path = os.path.join(get_cache_dir(), hexlify(repository.id).decode('ascii'))
+        self.path = path or os.path.join(get_cache_dir(), hexlify(repository.id).decode('ascii'))
         if not os.path.exists(self.path):
             self.create()
         self.open()
-        if self.manifest.id != self.manifest_id:
+        if sync and self.manifest.id != self.manifest_id:
             # If repository is older than the cache something fishy is going on
             if self.timestamp and self.timestamp > manifest.timestamp:
                 raise self.RepositoryReplay()
@@ -121,6 +121,9 @@ class Cache(object):
     def rollback(self):
         """Roll back partial and aborted transactions
         """
+        # Remove partial transaction
+        if os.path.exists(os.path.join(self.path, 'txn.tmp')):
+            shutil.rmtree(os.path.join(self.path, 'txn.tmp'))
         # Roll back active transaction
         txn_dir = os.path.join(self.path, 'txn.active')
         if os.path.exists(txn_dir):
@@ -128,9 +131,8 @@ class Cache(object):
             shutil.copy(os.path.join(txn_dir, 'chunks'), self.path)
             shutil.copy(os.path.join(txn_dir, 'files'), self.path)
             os.rename(txn_dir, os.path.join(self.path, 'txn.tmp'))
-        # Remove partial transaction
-        if os.path.exists(os.path.join(self.path, 'txn.tmp')):
-            shutil.rmtree(os.path.join(self.path, 'txn.tmp'))
+            if os.path.exists(os.path.join(self.path, 'txn.tmp')):
+                shutil.rmtree(os.path.join(self.path, 'txn.tmp'))
         self.txn_active = False
 
     def sync(self):
@@ -146,24 +148,25 @@ class Cache(object):
         print('Initializing cache...')
         self.chunks.clear()
         unpacker = msgpack.Unpacker()
+        repository = cache_if_remote(self.repository)
         for name, info in self.manifest.archives.items():
-            id = info[b'id']
-            cdata = self.repository.get(id)
-            data = self.key.decrypt(id, cdata)
-            add(id, len(data), len(cdata))
+            archive_id = info[b'id']
+            cdata = repository.get(archive_id)
+            data = self.key.decrypt(archive_id, cdata)
+            add(archive_id, len(data), len(cdata))
             archive = msgpack.unpackb(data)
-            decode_dict(archive, (b'name', b'hostname', b'username', b'time'))  # fixme: argv
+            if archive[b'version'] != 1:
+                raise Exception('Unknown archive metadata version')
+            decode_dict(archive, (b'name',))
             print('Analyzing archive:', archive[b'name'])
-            for id, chunk in zip_longest(archive[b'items'], self.repository.get_many(archive[b'items'])):
-                data = self.key.decrypt(id, chunk)
-                add(id, len(data), len(chunk))
+            for key, chunk in zip(archive[b'items'], repository.get_many(archive[b'items'])):
+                data = self.key.decrypt(key, chunk)
+                add(key, len(data), len(chunk))
                 unpacker.feed(data)
                 for item in unpacker:
-                    try:
-                        for id, size, csize in item[b'chunks']:
-                            add(id, size, csize)
-                    except KeyError:
-                        pass
+                    if b'chunks' in item:
+                        for chunk_id, size, csize in item[b'chunks']:
+                            add(chunk_id, size, csize)
 
     def add_chunk(self, id, data, stats):
         if not self.txn_active:
@@ -189,15 +192,17 @@ class Cache(object):
         stats.update(size, csize, False)
         return id, size, csize
 
-    def chunk_decref(self, id):
+    def chunk_decref(self, id, stats):
         if not self.txn_active:
             self.begin_txn()
         count, size, csize = self.chunks[id]
         if count == 1:
             del self.chunks[id]
             self.repository.delete(id, wait=False)
+            stats.update(-size, -csize, True)
         else:
             self.chunks[id] = (count - 1, size, csize)
+            stats.update(-size, -csize, False)
 
     def file_known_and_unchanged(self, path_hash, st):
         if self.files is None:
@@ -206,7 +211,8 @@ class Cache(object):
         if (entry and entry[3] == st_mtime_ns(st)
             and entry[2] == st.st_size and entry[1] == st.st_ino):
             # reset entry age
-            self.files[path_hash][0] = 0
+            if entry[0] != 0:
+                self.files[path_hash][0] = 0
             return entry[4]
         else:
             return None
